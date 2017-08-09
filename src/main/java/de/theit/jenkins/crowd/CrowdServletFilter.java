@@ -93,6 +93,8 @@ public class CrowdServletFilter implements Filter {
     private Cache<String, Boolean> validationCache;
     private Cache<String, Authentication> authenticationCache;
 
+    private static final int MAX_CACHE_SIZE = 2500;
+
     /**
      * Creates a new instance of this class.
      *
@@ -115,8 +117,8 @@ public class CrowdServletFilter implements Filter {
             this.rememberMe = (CrowdRememberMeServices) this.securityRealm.getSecurityComponents().rememberMe;
         }
 
-        validationCache = CacheBuilder.newBuilder().maximumSize(1000).expireAfterWrite(this.configuration.clientProperties.getSessionValidationInterval(), TimeUnit.MINUTES).build();
-        authenticationCache = CacheBuilder.newBuilder().maximumSize(1000).expireAfterAccess(30, TimeUnit.MINUTES).build();
+        validationCache = CacheBuilder.newBuilder().maximumSize(MAX_CACHE_SIZE).expireAfterWrite(this.configuration.clientProperties.getSessionValidationInterval(), TimeUnit.MINUTES).build();
+        authenticationCache = CacheBuilder.newBuilder().maximumSize(MAX_CACHE_SIZE).expireAfterAccess(15, TimeUnit.MINUTES).build();
     }
 
     /**

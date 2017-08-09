@@ -32,10 +32,13 @@ import static de.theit.jenkins.crowd.ErrorMessages.operationFailed;
 import static de.theit.jenkins.crowd.ErrorMessages.userNotFound;
 
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-import jenkins.model.Jenkins;
+import com.atlassian.crowd.model.user.User;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 import org.acegisecurity.GrantedAuthority;
 import org.acegisecurity.GrantedAuthorityImpl;
 
@@ -49,6 +52,8 @@ import com.atlassian.crowd.integration.http.util.CrowdHttpTokenHelper;
 import com.atlassian.crowd.model.group.Group;
 import com.atlassian.crowd.service.client.ClientProperties;
 import com.atlassian.crowd.service.client.CrowdClient;
+import org.acegisecurity.userdetails.UsernameNotFoundException;
+import org.springframework.dao.DataRetrievalFailureException;
 
 /**
  * This class contains all objects that are necessary to access the REST
@@ -92,6 +97,9 @@ public class CrowdConfigurationService {
 
     public boolean useSSO;
 
+    private Cache<String, User> userCache;
+	private Cache<String, Set<String>> userGroupCache;
+
     /**
      * Creates a new Crowd configuration object.
      *
@@ -117,6 +125,41 @@ public class CrowdConfigurationService {
 		}
 
 		this.nestedGroups = pNestedGroups;
+
+		userCache = CacheBuilder.newBuilder().maximumSize(2500).expireAfterAccess(15, TimeUnit.MINUTES).build();
+		userGroupCache = CacheBuilder.newBuilder().maximumSize(2500).expireAfterAccess(15, TimeUnit.MINUTES).build();
+	}
+
+	public User getUser(String username) {
+		User user = userCache.getIfPresent(username);
+		if (user == null) {
+			try {
+				// load the user object from the remote Crowd server
+				if (LOG.isLoggable(Level.FINE)) {
+					LOG.fine("Loading user object from the remote Crowd server...");
+				}
+				user = crowdClient.getUser(username);
+			} catch (UserNotFoundException ex) {
+				if (LOG.isLoggable(Level.INFO)) {
+					LOG.info(userNotFound(username));
+				}
+				throw new UsernameNotFoundException(userNotFound(username), ex);
+			} catch (ApplicationPermissionException ex) {
+				LOG.warning(applicationPermission());
+				throw new DataRetrievalFailureException(applicationPermission(), ex);
+			} catch (InvalidAuthenticationException ex) {
+				LOG.warning(invalidAuthentication());
+				throw new DataRetrievalFailureException(invalidAuthentication(), ex);
+			} catch (OperationFailedException ex) {
+				LOG.log(Level.SEVERE, operationFailed(), ex);
+				throw new DataRetrievalFailureException(operationFailed(), ex);
+			}
+			if (user != null) {
+				userCache.put(username, user);
+			}
+		}
+
+		return user;
 	}
 
 	/**
@@ -133,19 +176,11 @@ public class CrowdConfigurationService {
 	public boolean isGroupMember(String username) {
 		boolean retval = false;
 
-		try {
-			for (String group : this.allowedGroupNames) {
-				retval = isGroupMember(username, group);
-				if (retval) {
-					break;
-				}
+		for (String group : this.allowedGroupNames) {
+			retval = isGroupMember(username, group);
+			if (retval) {
+				break;
 			}
-		} catch (ApplicationPermissionException ex) {
-			LOG.warning(applicationPermission());
-		} catch (InvalidAuthenticationException ex) {
-			LOG.warning(invalidAuthentication());
-		} catch (OperationFailedException ex) {
-			LOG.log(Level.SEVERE, operationFailed(), ex);
 		}
 
 		return retval;
@@ -174,32 +209,9 @@ public class CrowdConfigurationService {
 	 *             invalid arguments and the operation not being supported on
 	 *             the server.
 	 */
-	private boolean isGroupMember(String username, String group)
-			throws ApplicationPermissionException,
-			InvalidAuthenticationException, OperationFailedException {
-		boolean retval = false;
-
-		if (isGroupActive(group)) {
-			if (LOG.isLoggable(Level.FINE)) {
-				LOG.fine("Checking group membership for user '" + username
-						+ "' and group '" + group + "'...");
-			}
-			if (this.crowdClient.isUserDirectGroupMember(username, group)) {
-				retval = true;
-				if (LOG.isLoggable(Level.FINER)) {
-					LOG.finer("=> user is a direct group member");
-				}
-			} else if (this.nestedGroups
-					&& this.crowdClient
-							.isUserNestedGroupMember(username, group)) {
-				retval = true;
-				if (LOG.isLoggable(Level.FINER)) {
-					LOG.finer("=> user is a nested group member");
-				}
-			}
-		}
-
-		return retval;
+	private boolean isGroupMember(String username, String group) {
+		Set<String> groupNames = getGroupNamesForUser(username);
+		return groupNames.contains(group);
 	}
 
 	/**
@@ -263,47 +275,22 @@ public class CrowdConfigurationService {
 					}
 				});
 
-		HashSet<String> groupNames = new HashSet<String>();
+		Set<String> groupNames = getGroupNamesForUser(username);
 
-		// retrieve the names of all groups the user is a direct member of
-		try {
-			int index = 0;
-			if (LOG.isLoggable(Level.FINE)) {
-				LOG.fine("Retrieve list of groups with direct membership for user '"
-						+ username + "'...");
-			}
-			while (true) {
-				if (LOG.isLoggable(Level.FINEST)) {
-					LOG.finest("Fetching groups [" + index + "..."
-							+ (index + MAX_GROUPS - 1) + "]...");
-				}
-				List<Group> groups = this.crowdClient.getGroupsForUser(
-						username, index, MAX_GROUPS);
-				if (null == groups || groups.isEmpty()) {
-					break;
-				}
-				for (Group group : groups) {
-					if (group.isActive()) {
-						groupNames.add(group.getName());
-					}
-				}
-				index += MAX_GROUPS;
-			}
-		} catch (UserNotFoundException ex) {
-			if (LOG.isLoggable(Level.INFO)) {
-				LOG.info(userNotFound(username));
-			}
-		} catch (InvalidAuthenticationException ex) {
-			LOG.warning(invalidAuthentication());
-		} catch (ApplicationPermissionException ex) {
-			LOG.warning(applicationPermission());
-		} catch (OperationFailedException ex) {
-			LOG.log(Level.SEVERE, operationFailed(), ex);
+		// now create the list of authorities
+		for (String str : groupNames) {
+			authorities.add(new GrantedAuthorityImpl(str));
 		}
 
-		// now the same but for nested group membership if this configuration
-		// setting is active/enabled
-		if (this.nestedGroups) {
+		return authorities;
+	}
+
+	private Set<String> getGroupNamesForUser(String username) {
+		Set<String> groupNames = userGroupCache.getIfPresent(username);
+
+		if (groupNames == null) {
+			groupNames = new HashSet<>();
+			// retrieve the names of all groups the user is a direct member of
 			try {
 				int index = 0;
 				if (LOG.isLoggable(Level.FINE)) {
@@ -315,8 +302,8 @@ public class CrowdConfigurationService {
 						LOG.finest("Fetching groups [" + index + "..."
 								+ (index + MAX_GROUPS - 1) + "]...");
 					}
-					List<Group> groups = this.crowdClient
-							.getGroupsForNestedUser(username, index, MAX_GROUPS);
+					List<Group> groups = this.crowdClient.getGroupsForUser(
+							username, index, MAX_GROUPS);
 					if (null == groups || groups.isEmpty()) {
 						break;
 					}
@@ -338,14 +325,51 @@ public class CrowdConfigurationService {
 			} catch (OperationFailedException ex) {
 				LOG.log(Level.SEVERE, operationFailed(), ex);
 			}
+
+			// now the same but for nested group membership if this configuration
+			// setting is active/enabled
+			if (this.nestedGroups) {
+				try {
+					int index = 0;
+					if (LOG.isLoggable(Level.FINE)) {
+						LOG.fine("Retrieve list of groups with direct membership for user '"
+								+ username + "'...");
+					}
+					while (true) {
+						if (LOG.isLoggable(Level.FINEST)) {
+							LOG.finest("Fetching groups [" + index + "..."
+									+ (index + MAX_GROUPS - 1) + "]...");
+						}
+						List<Group> groups = this.crowdClient
+								.getGroupsForNestedUser(username, index, MAX_GROUPS);
+						if (null == groups || groups.isEmpty()) {
+							break;
+						}
+						for (Group group : groups) {
+							if (group.isActive()) {
+								groupNames.add(group.getName());
+							}
+						}
+						index += MAX_GROUPS;
+					}
+				} catch (UserNotFoundException ex) {
+					if (LOG.isLoggable(Level.INFO)) {
+						LOG.info(userNotFound(username));
+					}
+				} catch (InvalidAuthenticationException ex) {
+					LOG.warning(invalidAuthentication());
+				} catch (ApplicationPermissionException ex) {
+					LOG.warning(applicationPermission());
+				} catch (OperationFailedException ex) {
+					LOG.log(Level.SEVERE, operationFailed(), ex);
+				}
+			}
+			if (!groupNames.isEmpty()) {
+				userGroupCache.put(username, groupNames);
+			}
 		}
 
-		// now create the list of authorities
-		for (String str : groupNames) {
-			authorities.add(new GrantedAuthorityImpl(str));
-		}
-
-		return authorities;
+		return groupNames;
 	}
 
     static public Properties getProperties(String url, String applicationName, String password,

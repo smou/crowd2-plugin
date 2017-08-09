@@ -25,16 +25,11 @@
  */
 package de.theit.jenkins.crowd;
 
-import static de.theit.jenkins.crowd.ErrorMessages.applicationPermission;
-import static de.theit.jenkins.crowd.ErrorMessages.invalidAuthentication;
-import static de.theit.jenkins.crowd.ErrorMessages.operationFailed;
-import static de.theit.jenkins.crowd.ErrorMessages.userNotFound;
 import static de.theit.jenkins.crowd.ErrorMessages.userNotValid;
 import hudson.security.SecurityRealm;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import org.acegisecurity.GrantedAuthority;
@@ -44,10 +39,6 @@ import org.acegisecurity.userdetails.UsernameNotFoundException;
 import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DataRetrievalFailureException;
 
-import com.atlassian.crowd.exception.ApplicationPermissionException;
-import com.atlassian.crowd.exception.InvalidAuthenticationException;
-import com.atlassian.crowd.exception.OperationFailedException;
-import com.atlassian.crowd.exception.UserNotFoundException;
 import com.atlassian.crowd.model.user.User;
 
 /**
@@ -97,28 +88,7 @@ public class CrowdUserDetailsService implements UserDetailsService {
                         this.configuration.allowedGroupNames));
             }
         }
-		User user;
-		try {
-			// load the user object from the remote Crowd server
-			if (LOG.isLoggable(Level.FINE)) {
-				LOG.fine("Loading user object from the remote Crowd server...");
-			}
-			user = this.configuration.crowdClient.getUser(username);
-		} catch (UserNotFoundException ex) {
-			if (LOG.isLoggable(Level.INFO)) {
-				LOG.info(userNotFound(username));
-			}
-			throw new UsernameNotFoundException(userNotFound(username), ex);
-		} catch (ApplicationPermissionException ex) {
-			LOG.warning(applicationPermission());
-			throw new DataRetrievalFailureException(applicationPermission(), ex);
-		} catch (InvalidAuthenticationException ex) {
-			LOG.warning(invalidAuthentication());
-			throw new DataRetrievalFailureException(invalidAuthentication(), ex);
-		} catch (OperationFailedException ex) {
-			LOG.log(Level.SEVERE, operationFailed(), ex);
-			throw new DataRetrievalFailureException(operationFailed(), ex);
-		}
+		User user = this.configuration.getUser(username);
 
 		// create the list of granted authorities
 		List<GrantedAuthority> authorities = new ArrayList<GrantedAuthority>();
